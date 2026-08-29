@@ -1,4 +1,6 @@
-import { sql } from '@vercel/postgres';
+import { neon } from '@neondatabase/serverless';
+
+const sql = neon(process.env.POSTGRES_URL);
 
 async function fetchYahooPrice(symbol) {
   try {
@@ -18,15 +20,16 @@ function buildYahooSymbol(asset) {
   if (!asset.ticker) return null;
   if (asset.category === 'crypto') return `${asset.ticker.toUpperCase()}-USD`;
   if (['actions', 'etf', 'pension'].includes(asset.category)) return asset.ticker;
-  return null; // commodités : pas de correspondance fiable connue pour l'instant, dernier prix conservé
+  return null;
 }
 
 export default async function handler(req, res) {
-  if (req.headers['authorization'] !== `Bearer ${process.env.CRON_SECRET}`) {
+  const providedSecret = req.headers['authorization']?.replace('Bearer ', '') || req.query.secret;
+  if (providedSecret !== process.env.CRON_SECRET) {
     return res.status(401).end();
   }
 
-  const { rows } = await sql`SELECT value FROM portfolio_data WHERE key = 'assets'`;
+  const rows = await sql`SELECT value FROM portfolio_data WHERE key = 'assets'`;
   const assets = rows[0]?.value || [];
 
   let total = 0;
@@ -40,7 +43,7 @@ export default async function handler(req, res) {
     if (symbol) {
       const live = await fetchYahooPrice(symbol);
       if (live) price = live;
-      await new Promise(r => setTimeout(r, 300)); // reste courtois envers Yahoo Finance
+      await new Promise(r => setTimeout(r, 300));
     }
 
     const value = (a.quantity || 1) * price;
