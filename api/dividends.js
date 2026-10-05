@@ -45,7 +45,9 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-api-key');
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.headers['x-api-key'] !== process.env.SYNC_SECRET) {
+  // Authentification : en-tête x-api-key (utilisé par l'app) ou ?secret=... (pour tester dans un navigateur)
+  const given = req.headers['x-api-key'] || req.query.secret;
+  if (!process.env.SYNC_SECRET || given !== process.env.SYNC_SECRET) {
     return res.status(401).json({ error: 'Non autorisé' });
   }
   const symbols = String(req.query.symbols || '')
@@ -60,7 +62,5 @@ export default async function handler(req, res) {
     batch.forEach((s, k) => { out[s] = results[k]; });
   }
   res.setHeader('Cache-Control', 's-maxage=3600');
-  res.status(200).json(out);
-}s.setHeader('Cache-Control', 's-maxage=3600');
   res.status(200).json(out);
 }
