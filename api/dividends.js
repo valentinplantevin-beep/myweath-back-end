@@ -6,7 +6,7 @@
 const UA = 'Mozilla/5.0 (compatible; CapX/1.0)';
  
 async function one(symbol) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=2y&interval=1mo&events=div`;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=2y&interval=1d&events=div`;
   const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
   if (!r.ok) return null;
   const j = await r.json();
@@ -21,6 +21,8 @@ async function one(symbol) {
   const annual = recent.reduce((s, d) => s + d.amount, 0);
   const last = divs.length ? new Date(Math.max(...divs.map(d => d.date)) * 1000).toISOString().slice(0, 10) : null;
   return {
+    n12: recent.length,   // nombre de versements sur 12 mois (pour comprendre un résultat à 0 %)
+    n: divs.length,       // nombre de versements sur 2 ans
     yield: Math.round((annual / price) * 10000) / 100, // en %, 2 décimales (le prix et les dividendes sont dans la même unité, même en pence)
     annual: Math.round(annual * 10000) / 10000,
     price,
