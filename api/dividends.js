@@ -73,9 +73,8 @@ async function forwardInfo(symbols) {
     for (const q of (j && j.quoteResponse && j.quoteResponse.result) || []) {
       const rate = q.dividendRate, price = q.regularMarketPrice;
       if (!(rate > 0) || !(price > 0)) { out[q.symbol] = { rate: 0, yield: 0 }; continue; }
-      let y = rate / price * 100;
-      if (y > 40 && y / 100 <= 25) y = y / 100; // cours en pence, dividende en livres (ou l'inverse)
-      out[q.symbol] = { rate, yield: Math.round(y * 100) / 100 };
+      // Londres : le cours est en pence (GBp) et le dividende prévisionnel parfois en livres → l'unité est tranchée plus bas
+      out[q.symbol] = { rate, yield: rate / price * 100, pence: q.currency === 'GBp' || q.currency === 'GBX' };
     }
     return out;
   }
@@ -112,7 +111,18 @@ export default async function handler(req, res) {
       for (const s of ok) {
         out[s].trailingYield = out[s].yield;
         const f = fw[s];
-        if (f && f.rate > 0) { out[s].yield = f.yield; out[s].annual = f.rate; out[s].basis = 'forward'; }
+        if (f && f.rate > 0) {
+          // On essaie y, y×100 et y/100 ; on garde celui qui colle le mieux au rendement des 12 mois passés
+          // (ou, à défaut, une valeur plausible : pour une action de Londres en pence, le dividende est en livres → ×100).
+          let y = f.yield;
+          const cands = [y, y * 100, y / 100].filter(v => v > 0 && v <= 25);
+          const t = out[s].trailingYield;
+          if (t > 0 && cands.length) y = cands.reduce((b, v) => Math.abs(Math.log(v / t)) < Math.abs(Math.log(b / t)) ? v : b);
+          else if (f.pence && y * 100 <= 25) y = y * 100;
+          else if (!cands.includes(y)) y = cands.length ? cands[0] : 0;
+          if (y > 0) { out[s].yield = Math.round(y * 100) / 100; out[s].annual = f.rate; out[s].basis = 'forward'; }
+          else out[s].basis = 'trailing';
+        }
         else out[s].basis = 'trailing';
       }
     }
@@ -120,6 +130,9 @@ export default async function handler(req, res) {
     fwdErr = String(e.message || e).slice(0, 80);
     for (const s of Object.keys(out)) if (out[s] && !out[s].error) { out[s].basis = 'trailing'; out[s].forwardError = fwdErr; }
   }
+  res.setHeader('Cache-Control','no-store');
+  res.status(200).json(out);
+}
   res.setHeader('Cache-Control','no-store');
   res.status(200).json(out);
 }
