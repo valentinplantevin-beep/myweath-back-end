@@ -32,12 +32,54 @@ async function one(symbol) {
         price,
         currency: res.meta.currency || null,
         last,
+        payments: recent.sort((x, y) => x.date - y.date).map(x => ({ d: new Date(x.date * 1000).toISOString().slice(0, 10), a: Math.round(x.amount * 10000) / 10000 })),
       };
     } catch (e) {
       lastErr = String(e.message || e).slice(0, 80);
     }
   }
   return { error: lastErr };
+}
+ 
+ 
+// ---- Dividende PRÉVISIONNEL (forward) : celui que Yahoo affiche sur sa fiche (dividendRate) ----
+// Yahoo exige un « crumb » (jeton) + un cookie pour cette route. On les récupère une fois et on les garde en mémoire.
+let _auth = null;
+async function getAuth() {
+  if (_auth && Date.now() - _auth.t < 30 * 60 * 1000) return _auth;
+  const r1 = await fetch('https://fc.yahoo.com', { headers: { 'User-Agent': UA }, redirect: 'manual' });
+  let cookies = [];
+  if (r1.headers.getSetCookie) cookies = r1.headers.getSetCookie();
+  else if (r1.headers.get('set-cookie')) cookies = [r1.headers.get('set-cookie')];
+  const cookie = cookies.map(c => c.split(';')[0]).join('; ');
+  if (!cookie) throw new Error('cookie Yahoo absent');
+  const r2 = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', { headers: { 'User-Agent': UA, Cookie: cookie } });
+  if (!r2.ok) throw new Error('crumb HTTP ' + r2.status);
+  const crumb = (await r2.text()).trim();
+  if (!crumb || crumb.length > 40 || /[<{]/.test(crumb)) throw new Error('crumb invalide');
+  _auth = { cookie, crumb, t: Date.now() };
+  return _auth;
+}
+// Renvoie { SYMBOLE: { rate, yield } } (yield en %), ou lève une erreur lisible.
+async function forwardInfo(symbols) {
+  const out = {};
+  const a = await getAuth();
+  for (const host of ['query1', 'query2']) {
+    const url = `https://${host}.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbols.join(','))}&crumb=${encodeURIComponent(a.crumb)}`;
+    const r = await fetch(url, { headers: { 'User-Agent': UA, Cookie: a.cookie, Accept: 'application/json' } });
+    if (r.status === 401 || r.status === 403) { _auth = null; throw new Error('quote HTTP ' + r.status); }
+    if (!r.ok) continue;
+    const j = await r.json();
+    for (const q of (j && j.quoteResponse && j.quoteResponse.result) || []) {
+      const rate = q.dividendRate, price = q.regularMarketPrice;
+      if (!(rate > 0) || !(price > 0)) { out[q.symbol] = { rate: 0, yield: 0 }; continue; }
+      let y = rate / price * 100;
+      if (y > 40 && y / 100 <= 25) y = y / 100; // cours en pence, dividende en livres (ou l'inverse)
+      out[q.symbol] = { rate, yield: Math.round(y * 100) / 100 };
+    }
+    return out;
+  }
+  throw new Error('quote indisponible');
 }
  
 export default async function handler(req, res) {
@@ -61,6 +103,23 @@ export default async function handler(req, res) {
     const results = await Promise.all(batch.map(s => one(s).catch(e => ({ error: String(e.message || e).slice(0, 80) }))));
     batch.forEach((s, k) => { out[s] = results[k]; });
   }
-  res.setHeader('Cache-Control', 's-maxage=3600');
+  // Dividende prévisionnel : remplace le rendement « 12 derniers mois » quand Yahoo le fournit
+  let fwdErr = null;
+  try {
+    const ok = Object.keys(out).filter(s => out[s] && !out[s].error);
+    if (ok.length) {
+      const fw = await forwardInfo(ok);
+      for (const s of ok) {
+        out[s].trailingYield = out[s].yield;
+        const f = fw[s];
+        if (f && f.rate > 0) { out[s].yield = f.yield; out[s].annual = f.rate; out[s].basis = 'forward'; }
+        else out[s].basis = 'trailing';
+      }
+    }
+  } catch (e) {
+    fwdErr = String(e.message || e).slice(0, 80);
+    for (const s of Object.keys(out)) if (out[s] && !out[s].error) { out[s].basis = 'trailing'; out[s].forwardError = fwdErr; }
+  }
+  res.setHeader('Cache-Control','no-store');
   res.status(200).json(out);
 }
