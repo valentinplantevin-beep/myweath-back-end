@@ -4,6 +4,8 @@
 //             "ASML": { yield: 0, ... }, "XXX": { error: "Yahoo HTTP 429" } }
  
 // Yahoo refuse les requêtes dont l'identifiant ne ressemble pas à un vrai navigateur.
+// Chaque appel réseau est limité dans le temps : Vercel coupe la fonction à 10 s, sans en-têtes CORS (l'app verrait « Failed to fetch »).
+const TO = ms => AbortSignal.timeout(ms);
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
  
 async function one(symbol) {
@@ -11,7 +13,7 @@ async function one(symbol) {
   for (const host of ['query1', 'query2']) {
     try {
       const url = `https://${host}.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=2y&interval=1d&events=div`;
-      const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json,text/plain,*/*', 'Accept-Language': 'en-US,en;q=0.9' } });
+      const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json,text/plain,*/*', 'Accept-Language': 'en-US,en;q=0.9' }, signal: TO(4000) });
       if (!r.ok) { lastErr = `Yahoo HTTP ${r.status}`; continue; }
       const j = await r.json();
       const res = j && j.chart && j.chart.result && j.chart.result[0];
@@ -47,13 +49,13 @@ async function one(symbol) {
 let _auth = null;
 async function getAuth() {
   if (_auth && Date.now() - _auth.t < 30 * 60 * 1000) return _auth;
-  const r1 = await fetch('https://fc.yahoo.com', { headers: { 'User-Agent': UA }, redirect: 'manual' });
+  const r1 = await fetch('https://fc.yahoo.com', { headers: { 'User-Agent': UA }, redirect: 'manual', signal: TO(3000) });
   let cookies = [];
   if (r1.headers.getSetCookie) cookies = r1.headers.getSetCookie();
   else if (r1.headers.get('set-cookie')) cookies = [r1.headers.get('set-cookie')];
   const cookie = cookies.map(c => c.split(';')[0]).join('; ');
   if (!cookie) throw new Error('cookie Yahoo absent');
-  const r2 = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', { headers: { 'User-Agent': UA, Cookie: cookie } });
+  const r2 = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', { headers: { 'User-Agent': UA, Cookie: cookie }, signal: TO(3000) });
   if (!r2.ok) throw new Error('crumb HTTP ' + r2.status);
   const crumb = (await r2.text()).trim();
   if (!crumb || crumb.length > 40 || /[<{]/.test(crumb)) throw new Error('crumb invalide');
@@ -66,7 +68,7 @@ async function forwardInfo(symbols) {
   const a = await getAuth();
   for (const host of ['query1', 'query2']) {
     const url = `https://${host}.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbols.join(','))}&crumb=${encodeURIComponent(a.crumb)}`;
-    const r = await fetch(url, { headers: { 'User-Agent': UA, Cookie: a.cookie, Accept: 'application/json' } });
+    const r = await fetch(url, { headers: { 'User-Agent': UA, Cookie: a.cookie, Accept: 'application/json' }, signal: TO(3500) });
     if (r.status === 401 || r.status === 403) { _auth = null; throw new Error('quote HTTP ' + r.status); }
     if (!r.ok) continue;
     const j = await r.json();
@@ -95,6 +97,7 @@ export default async function handler(req, res) {
     .split(',').map(s => s.trim()).filter(Boolean).slice(0, 40);
   if (!symbols.length) return res.status(400).json({ error: 'symbols manquant' });
  
+  const t0 = Date.now();
   const out = {};
   // 6 requêtes en parallèle au maximum
   for (let i = 0; i < symbols.length; i += 6) {
@@ -106,6 +109,7 @@ export default async function handler(req, res) {
   let fwdErr = null;
   try {
     const ok = Object.keys(out).filter(s => out[s] && !out[s].error);
+    if (Date.now() - t0 > 5000) throw new Error('trop lent, prévisionnel sauté');
     if (ok.length) {
       const fw = await forwardInfo(ok);
       for (const s of ok) {
@@ -132,7 +136,6 @@ export default async function handler(req, res) {
   }
   res.setHeader('Cache-Control','no-store');
   res.status(200).json(out);
-}
   res.setHeader('Cache-Control','no-store');
   res.status(200).json(out);
 }
