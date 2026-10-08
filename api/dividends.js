@@ -62,6 +62,18 @@ async function getAuth() {
   _auth = { cookie, crumb, t: Date.now() };
   return _auth;
 }
+// Frais annuels (TER, en %) d'un ETF quand la route « quote » ne les donne pas : module fundProfile. Renvoie null si introuvable.
+async function etfFees(sym) {
+  const a = await getAuth();
+  const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(sym)}?modules=fundProfile&crumb=${encodeURIComponent(a.crumb)}`;
+  const r = await fetch(url, { headers: { 'User-Agent': UA, Cookie: a.cookie, Accept: 'application/json' }, signal: TO(3500) });
+  if (!r.ok) return null;
+  const j = await r.json();
+  const fp = j && j.quoteSummary && j.quoteSummary.result && j.quoteSummary.result[0] && j.quoteSummary.result[0].fundProfile;
+  const v = fp && fp.feesExpensesInvestment && fp.feesExpensesInvestment.annualReportExpenseRatio;
+  const raw = v && typeof v === 'object' ? v.raw : v;
+  return raw > 0 && raw < 0.1 ? Math.round(raw * 10000) / 100 : null; // 0,0007 → 0,07 %
+}
 // Renvoie { SYMBOLE: { rate, yield } } (yield en %), ou lève une erreur lisible.
 async function forwardInfo(symbols) {
   const out = {};
@@ -76,7 +88,8 @@ async function forwardInfo(symbols) {
       const rate = q.dividendRate, price = q.regularMarketPrice;
       const pe = q.trailingPE > 0 ? Math.round(q.trailingPE * 10) / 10 : null; // PER (12 derniers mois) ; absent pour les ETF et les sociétés en perte
       const pnav = q.priceToBook > 0 ? Math.round(q.priceToBook * 100) / 100 : null; // cours ÷ valeur comptable par action (≈ P/NAV pour un REIT)
-      const extra = { pnav };
+      const ter = q.netExpenseRatio > 0 ? q.netExpenseRatio : (q.annualReportExpenseRatio > 0 ? q.annualReportExpenseRatio * 100 : null); // frais annuels des ETF, en %
+      const extra = { pnav, ter };
       if (!(rate > 0) || !(price > 0)) { out[q.symbol] = { rate: 0, yield: 0, pe, ...extra }; continue; }
       // Londres : le cours est en pence (GBp) et le dividende prévisionnel parfois en livres → l'unité est tranchée plus bas
       out[q.symbol] = { rate, yield: rate / price * 100, pence: q.currency === 'GBp' || q.currency === 'GBX', pe, ...extra };
@@ -100,6 +113,7 @@ export default async function handler(req, res) {
     .split(',').map(s => s.trim()).filter(Boolean).slice(0, 40);
   if (!symbols.length) return res.status(400).json({ error: 'symbols manquant' });
  
+  const wantEtf = new Set(String(req.query.etf || '').split(',').map(x => x.trim()).filter(Boolean));
   const t0 = Date.now();
   const out = {};
   // 6 requêtes en parallèle au maximum
@@ -120,6 +134,8 @@ export default async function handler(req, res) {
         const f = fw[s];
         out[s].pe = (f && f.pe > 0) ? f.pe : null;
         out[s].pnav = (f && f.pnav > 0) ? f.pnav : null;
+        out[s].ter = (f && f.ter > 0) ? Math.round(f.ter * 100) / 100 : null;
+        if (!out[s].ter && wantEtf.has(s)) { try { out[s].ter = await etfFees(s); } catch (e) { out[s].ter = null; } }
         if (f && f.rate > 0) {
           // On essaie y, y×100 et y/100 ; on garde celui qui colle le mieux au rendement des 12 mois passés
           // (ou, à défaut, une valeur plausible : pour une action de Londres en pence, le dividende est en livres → ×100).
