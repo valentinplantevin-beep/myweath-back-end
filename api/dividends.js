@@ -74,9 +74,10 @@ async function forwardInfo(symbols) {
     const j = await r.json();
     for (const q of (j && j.quoteResponse && j.quoteResponse.result) || []) {
       const rate = q.dividendRate, price = q.regularMarketPrice;
-      if (!(rate > 0) || !(price > 0)) { out[q.symbol] = { rate: 0, yield: 0 }; continue; }
+      const pe = q.trailingPE > 0 ? Math.round(q.trailingPE * 10) / 10 : null; // PER (12 derniers mois) ; absent pour les ETF et les sociétés en perte
+      if (!(rate > 0) || !(price > 0)) { out[q.symbol] = { rate: 0, yield: 0, pe }; continue; }
       // Londres : le cours est en pence (GBp) et le dividende prévisionnel parfois en livres → l'unité est tranchée plus bas
-      out[q.symbol] = { rate, yield: rate / price * 100, pence: q.currency === 'GBp' || q.currency === 'GBX' };
+      out[q.symbol] = { rate, yield: rate / price * 100, pence: q.currency === 'GBp' || q.currency === 'GBX', pe };
     }
     return out;
   }
@@ -115,6 +116,7 @@ export default async function handler(req, res) {
       for (const s of ok) {
         out[s].trailingYield = out[s].yield;
         const f = fw[s];
+        out[s].pe = (f && f.pe > 0) ? f.pe : null;
         if (f && f.rate > 0) {
           // On essaie y, y×100 et y/100 ; on garde celui qui colle le mieux au rendement des 12 mois passés
           // (ou, à défaut, une valeur plausible : pour une action de Londres en pence, le dividende est en livres → ×100).
@@ -134,8 +136,6 @@ export default async function handler(req, res) {
     fwdErr = String(e.message || e).slice(0, 80);
     for (const s of Object.keys(out)) if (out[s] && !out[s].error) { out[s].basis = 'trailing'; out[s].forwardError = fwdErr; }
   }
-  res.setHeader('Cache-Control','no-store');
-  res.status(200).json(out);
   res.setHeader('Cache-Control','no-store');
   res.status(200).json(out);
 }
