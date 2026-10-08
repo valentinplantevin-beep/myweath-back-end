@@ -62,37 +62,6 @@ async function getAuth() {
   _auth = { cookie, crumb, t: Date.now() };
   return _auth;
 }
-// ---- P/FFO estimé (REITs) : FFO ≈ résultat net + amortissements − plus-values de cession d'immeubles (derniers comptes annuels) ----
-// Yahoo ne publie pas le FFO : c'est une ESTIMATION à partir des comptes. Renvoie le P/FFO, ou null si les données manquent.
-async function estimateFfo(sym, info) {
-  if (!info || !(info.shares > 0) || !(info.price > 0)) return null;
-  const types = ['annualNetIncome', 'annualNetIncomeCommonStockholders', 'annualDepreciationAndAmortization', 'annualDepreciationAmortizationDepletion', 'annualGainOnSaleOfPPE', 'annualGainOnSaleOfProperty', 'annualGainOnSaleOfBusiness'];
-  const p2 = Math.floor(Date.now() / 1000), p1 = p2 - 3 * 365 * 86400;
-  const url = `https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${encodeURIComponent(sym)}?type=${types.join(',')}&period1=${p1}&period2=${p2}`;
-  const r = await fetch(url, { headers: { 'User-Agent': UA, Accept: 'application/json' }, signal: TO(3500) });
-  if (!r.ok) return null;
-  const j = await r.json();
-  const last = {};
-  for (const e of (j && j.timeseries && j.timeseries.result) || []) {
-    const t = e.meta && e.meta.type && e.meta.type[0];
-    const arr = t && e[t];
-    if (!arr || !arr.length) continue;
-    const v = arr.filter(x => x && x.reportedValue && isFinite(x.reportedValue.raw)).pop();
-    if (v) last[t] = v.reportedValue.raw;
-  }
-  const ni = last.annualNetIncome ?? last.annualNetIncomeCommonStockholders;
-  const da = last.annualDepreciationAndAmortization ?? last.annualDepreciationAmortizationDepletion ?? 0;
-  const gain = last.annualGainOnSaleOfProperty ?? last.annualGainOnSaleOfPPE ?? 0;
-  if (!isFinite(ni)) return null;
-  const ffoPerShare = (ni + da - gain) / info.shares;
-  if (!(ffoPerShare > 0)) return null;
-  // Comptes et cours doivent être dans la même devise (le cours de Londres est en pence)
-  const norm = c => (c === 'GBp' || c === 'GBX') ? 'GBP' : c;
-  if (info.fcur && info.cur && norm(info.fcur) !== norm(info.cur)) return null;
-  const priceMain = (info.cur === 'GBp' || info.cur === 'GBX') ? info.price / 100 : info.price;
-  const ratio = priceMain / ffoPerShare;
-  return ratio > 0 && ratio < 200 ? Math.round(ratio * 10) / 10 : null;
-}
 // Renvoie { SYMBOLE: { rate, yield } } (yield en %), ou lève une erreur lisible.
 async function forwardInfo(symbols) {
   const out = {};
@@ -106,7 +75,8 @@ async function forwardInfo(symbols) {
     for (const q of (j && j.quoteResponse && j.quoteResponse.result) || []) {
       const rate = q.dividendRate, price = q.regularMarketPrice;
       const pe = q.trailingPE > 0 ? Math.round(q.trailingPE * 10) / 10 : null; // PER (12 derniers mois) ; absent pour les ETF et les sociétés en perte
-      const extra = { shares: q.sharesOutstanding, price, cur: q.currency, fcur: q.financialCurrency };
+      const pnav = q.priceToBook > 0 ? Math.round(q.priceToBook * 100) / 100 : null; // cours ÷ valeur comptable par action (≈ P/NAV pour un REIT)
+      const extra = { pnav };
       if (!(rate > 0) || !(price > 0)) { out[q.symbol] = { rate: 0, yield: 0, pe, ...extra }; continue; }
       // Londres : le cours est en pence (GBp) et le dividende prévisionnel parfois en livres → l'unité est tranchée plus bas
       out[q.symbol] = { rate, yield: rate / price * 100, pence: q.currency === 'GBp' || q.currency === 'GBX', pe, ...extra };
@@ -130,7 +100,6 @@ export default async function handler(req, res) {
     .split(',').map(s => s.trim()).filter(Boolean).slice(0, 40);
   if (!symbols.length) return res.status(400).json({ error: 'symbols manquant' });
  
-  const wantFfo = new Set(String(req.query.ffo || '').split(',').map(x => x.trim()).filter(Boolean));
   const t0 = Date.now();
   const out = {};
   // 6 requêtes en parallèle au maximum
@@ -150,7 +119,7 @@ export default async function handler(req, res) {
         out[s].trailingYield = out[s].yield;
         const f = fw[s];
         out[s].pe = (f && f.pe > 0) ? f.pe : null;
-        if (wantFfo.has(s)) { try { out[s].pffo = await estimateFfo(s, f); } catch (e) { out[s].pffo = null; } }
+        out[s].pnav = (f && f.pnav > 0) ? f.pnav : null;
         if (f && f.rate > 0) {
           // On essaie y, y×100 et y/100 ; on garde celui qui colle le mieux au rendement des 12 mois passés
           // (ou, à défaut, une valeur plausible : pour une action de Londres en pence, le dividende est en livres → ×100).
