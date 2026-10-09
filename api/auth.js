@@ -1,4 +1,5 @@
 // POST /api/auth  { action: 'register' | 'login', email, password, setupCode? }  → { token, email }
+// Création de compte : possible plusieurs fois, avec le code d'invitation (SYNC_SECRET).
 // GET  /api/auth  → { hasAccount: true|false }
 import { sql, cors, ensureTables, newSalt, hashPassword, checkPassword, makeToken } from './_lib.js';
  
@@ -24,12 +25,14 @@ export default async function handler(req, res) {
         return res.status(403).json({ error: 'Code de configuration incorrect' });
       }
       if (String(password).length < 8) return res.status(400).json({ error: 'Mot de passe : 8 caractères minimum' });
-      const rows = await sql`SELECT COUNT(*)::int AS n FROM capx_accounts`;
-      if (rows[0].n > 0) return res.status(403).json({ error: 'Un compte existe déjà. Connectez-vous avec.' });
+      // Plusieurs comptes possibles : chacun est protégé par le même code d'invitation (SYNC_SECRET).
+      const dup = await sql`SELECT 1 FROM capx_accounts WHERE email = ${mail}`;
+      if (dup.length) return res.status(409).json({ error: 'Un compte existe déjà avec cet e-mail. Connectez-vous.' });
       const salt = newSalt();
       const hash = hashPassword(password, salt);
+      const first = await sql`SELECT COUNT(*)::int AS n FROM capx_accounts`;
       const ins = await sql`INSERT INTO capx_accounts (email, salt, pw_hash) VALUES (${mail}, ${salt}, ${hash}) RETURNING id`;
-      return res.status(200).json({ token: makeToken(ins[0].id), email: mail });
+      return res.status(200).json({ token: makeToken(ins[0].id), email: mail, admin: first[0].n === 0 });
     }
  
     if (action === 'login') {
@@ -38,7 +41,8 @@ export default async function handler(req, res) {
         await wait(700);
         return res.status(401).json({ error: 'E-mail ou mot de passe incorrect' });
       }
-      return res.status(200).json({ token: makeToken(rows[0].id), email: mail });
+      const mn = await sql`SELECT MIN(id)::int AS m FROM capx_accounts`;
+      return res.status(200).json({ token: makeToken(rows[0].id), email: mail, admin: rows[0].id === mn[0].m });
     }
     return res.status(400).json({ error: 'Action inconnue' });
   } catch (e) {
